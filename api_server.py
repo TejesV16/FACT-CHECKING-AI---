@@ -152,6 +152,6 @@ class FactAIHandler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     host = os.environ.get("FACTAI_HOST", "127.0.0.1")
-    port = int(os.environ.get("FACTAI_PORT", "8000"))
+    port = int(os.environ.get("PORT", os.environ.get("FACTAI_PORT", "8000")))
     print(f"FactAI API available at http://{host}:{port}")
     ThreadingHTTPServer((host, port), FactAIHandler).serve_forever()
