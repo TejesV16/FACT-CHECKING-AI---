@@ -3,6 +3,22 @@
 A local claim-checker running
 entirely on free, local tools — no paid APIs, no API keys, anywhere.
 
+## Deploy on Streamlit Community Cloud
+
+This deployment runs the existing Streamlit interface in `app.py`. It does
+not use the React frontend, the local API server, Vercel, or Render.
+
+1. In Streamlit Community Cloud, create an app from this repository's `main`
+   branch with `app.py` as the main file.
+2. Leave the app's Python package installation to `requirements.txt`.
+   `packages.txt` installs `ffmpeg`, which Whisper needs for audio/video.
+3. Streamlit Cloud does not run a local Ollama server. That is safe: FactAI
+   automatically uses its evidence-grounded fallback summary instead.
+
+The first fact check can take several minutes while the NLI model downloads.
+Free hosting resources can still be insufficient for the NLI and Whisper
+models; text-only checks are the lightest path for a public demo.
+
 ## Reliability model
 
 FactAI reports evidence, not certainty. Each submitted passage is broken into
