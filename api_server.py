@@ -20,6 +20,7 @@ from transcriber import transcribe_media
 from web_search import official_office_query, search_web
 
 _model = None
+ALLOWED_ORIGIN = os.environ.get("FACTAI_ALLOWED_ORIGIN", "http://localhost:5173")
 
 
 def _nli_model():
@@ -52,18 +53,22 @@ def check_text(text: str) -> dict:
     checked = []
     for claim in claims:
         timing = {}
-        sources = search_web(claim, max_results=5, timing=timing)
+        sources = [
+            {**source, "retrieval_role": "supporting / neutral query"}
+            for source in search_web(claim, max_results=5, timing=timing)
+        ]
         counter_query = _counterevidence_query(claim)
         if counter_query:
             known_urls = {source.get("url") for source in sources}
             sources.extend(
-                source for source in search_web(counter_query, max_results=4, timing=timing)
+                {**source, "retrieval_role": "counterevidence query"}
+                for source in search_web(counter_query, max_results=4, timing=timing)
                 if source.get("url") and source.get("url") not in known_urls
             )
         official_query = official_office_query(claim)
         if official_query:
             known_urls = {source.get("url") for source in sources}
-            sources.extend(source for source in search_web(official_query, max_results=3, timing=timing)
+            sources.extend({**source, "retrieval_role": "official-source query"} for source in search_web(official_query, max_results=3, timing=timing)
                            if source.get("url") not in known_urls)
         result = verify_claim(claim, sources, tokenizer, model, summarizer_model=DEFAULT_SUMMARY_MODEL, timing=timing)
         result["elapsed"] = round(total_seconds(timing), 1)
@@ -101,13 +106,13 @@ class FactAIHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Access-Control-Allow-Origin", "http://localhost:5173")
+        self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
         self.end_headers()
         self.wfile.write(payload)
 
     def do_OPTIONS(self):
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "http://localhost:5173")
+        self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
@@ -146,5 +151,7 @@ class FactAIHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print("FactAI API available at http://localhost:8000")
-    ThreadingHTTPServer(("127.0.0.1", 8000), FactAIHandler).serve_forever()
+    host = os.environ.get("FACTAI_HOST", "127.0.0.1")
+    port = int(os.environ.get("FACTAI_PORT", "8000"))
+    print(f"FactAI API available at http://{host}:{port}")
+    ThreadingHTTPServer((host, port), FactAIHandler).serve_forever()

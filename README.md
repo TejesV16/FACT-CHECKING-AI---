@@ -3,6 +3,34 @@
 A local claim-checker running
 entirely on free, local tools — no paid APIs, no API keys, anywhere.
 
+## Reliability model
+
+FactAI reports evidence, not certainty. Each submitted passage is broken into
+separate claims where possible, then checked against a normal claim query, a
+counterevidence query for absolute claims, and an official-source query when a
+known office-holder pattern applies. The result view exposes the source tier,
+retrieval route, model stance, excerpt, any visible source date, and narrowly
+detected same-unit number mismatch. A missing, blocked, old, or JS-rendered
+source remains a limitation and should lead to an **Unverified** result rather
+than a confident conclusion.
+
+## Publish the web app
+
+The React site and the Python API must both be deployed: a static host alone
+cannot run Whisper, the local NLI model, or web retrieval.
+
+1. Deploy `frontend/` to a static host (for example Vercel, Netlify, or
+   Cloudflare Pages) with `npm run build` as its build command and `dist` as
+   its publish directory. Set `VITE_API_BASE_URL` to the public HTTPS API URL.
+2. Deploy the repository's Python service to a compute host with sufficient
+   RAM and persistent model storage. Use `.venv\\Scripts\\python api_server.py`
+   locally, or the equivalent production command. Set `FACTAI_HOST=0.0.0.0`,
+   `FACTAI_PORT` to the platform port, and `FACTAI_ALLOWED_ORIGIN` to the exact
+   frontend origin (for example `https://factai.example`).
+3. Put the API behind HTTPS, apply rate limits and request-size limits, and
+   do not expose a development server directly to the internet. Test
+   `/health` and one end-to-end check after deployment.
+
 It:
 1. Accepts **text**, or an **audio/video file**.
 2. Transcribes audio/video to text with **Whisper** (runs on your machine).

@@ -7,17 +7,40 @@ from fact_checker import (
     _map_verdict, _evidence_strength, _tenure_duration_conflict,
     is_tenure_duration_claim, _current_office_support, _direct_claim_support,
     _compound_actor_award_support, _orbital_relation, score_source_against_claim,
-    fetch_page_text,
+    _source_quality, _weighted_verdict, fetch_page_text, _number_conflict,
 )
 from web_search import official_office_query
 from api_server import _counterevidence_query
 from summarizer import _fallback_summary
 from fact_checker import verify_claim
 from timing import total_seconds, merge_timings
-from claim_extractor import _extract_claims_spacy, extract_claims
+from claim_extractor import _extract_claims_spacy, extract_claims, _decompose_compound_claim
 
 
 class ParsingAndDecisionTests(unittest.TestCase):
+    def test_deterministic_decomposition_splits_two_predicates(self):
+        self.assertEqual(
+            _decompose_compound_claim("Dhanush is a Tamil actor and has won National Awards."),
+            ["Dhanush is a Tamil actor.", "Dhanush has won National Awards."],
+        )
+
+    def test_number_check_requires_the_same_unit_and_a_different_value(self):
+        conflict = _number_conflict("Water freezes at 0 degrees Celsius.", "Water freezes at 10 degrees Celsius.")
+        self.assertEqual(conflict["claimed"], "0 degrees")
+        self.assertEqual(conflict["found"], "10 degrees")
+        self.assertIsNone(_number_conflict("Water freezes at 0 degrees Celsius.", "The study was published in 2024."))
+    def test_source_quality_prefers_official_and_downweights_reference_sources(self):
+        self.assertEqual(_source_quality("https://www.who.int/health-topic")[0], "Primary / official")
+        self.assertEqual(_source_quality("https://en.wikipedia.org/wiki/Fact_checking")[0], "Reference")
+
+    def test_weighted_verdict_requires_independent_evidence_or_a_primary_source(self):
+        weak_single_source = [{"url": "https://example.test/a", "stance": "entailment", "score": 1.0, "quality_weight": .55}]
+        self.assertEqual(_weighted_verdict(weak_single_source)[0], "Unverified")
+        independent_sources = weak_single_source + [{"url": "https://second.test/a", "stance": "entailment", "score": 1.0, "quality_weight": .55}]
+        self.assertEqual(_weighted_verdict(independent_sources)[0], "True")
+        mixed = independent_sources + [{"url": "https://third.test/a", "stance": "contradiction", "score": 1.0, "quality_weight": .55}]
+        self.assertEqual(_weighted_verdict(mixed)[0], "Misleading")
+
     def test_absolute_ev_lifecycle_claim_gets_counterevidence_query(self):
         self.assertEqual(
             _counterevidence_query("Electric vehicles produce zero emissions over their entire life cycle."),

@@ -162,9 +162,33 @@ def _extract_claims_spacy(text: str):
             key = normalized.lower()
             if key not in seen:
                 seen.add(key)
-                claims.append(normalized)
+                claims.extend(_decompose_compound_claim(normalized))
 
     return claims
+
+
+def _decompose_compound_claim(sentence: str) -> list[str]:
+    """Split a common two-predicate statement without requiring an LLM.
+
+    This intentionally handles only a safe shape: a named subject followed by
+    a copular fact and a second ``has/was/verb`` fact.  Broadly splitting on
+    every ``and`` would turn names, dates, and inseparable relationships into
+    malformed claims.
+    """
+    match = re.match(
+        r"^(?P<subject>[A-Z][\w .'-]{1,80}?)\s+"
+        r"(?P<first>is|are|was|were)\s+(?P<fact1>.+?)\s+and\s+"
+        r"(?:(?:he|she|they|it)\s+)?(?P<fact2>has|have|had|won|founded|created|"
+        r"published|served|led|produced|built|made)\s+(?P<object>.+?)([.!?])?$",
+        sentence,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return [sentence]
+    subject = match.group("subject").strip()
+    first = f"{subject} {match.group('first')} {match.group('fact1').strip()}."
+    second = f"{subject} {match.group('fact2')} {match.group('object').strip()}."
+    return [first, second]
 
 
 def extract_claims(text: str, model: str = DEFAULT_MODEL, max_claims: int = 3, timing: dict = None):

@@ -1,7 +1,8 @@
 import { ChangeEvent, FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 import { Paperclip, Clipboard, History, Menu, MessageCircle, MoreHorizontal, SquarePen, Plus, Search, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
 
-type CheckResult = { claim: string; verdict: "True" | "False" | "Misleading" | "Unverified"; strength: string; summary: string; sources: { title: string; url: string }[] };
+type Evidence = { title: string; url: string; stance: "entailment" | "contradiction" | "neutral"; excerpt: string; quality: string; retrieval_role: string; source_date?: string | null; number_check?: { claimed: string; found: string } | null };
+type CheckResult = { claim: string; verdict: "True" | "False" | "Misleading" | "Unverified"; strength: string; summary: string; sources: { title: string; url: string; quality?: string }[]; evidence?: Evidence[]; independent_sources?: number };
 type Conversation = { id: string; title: string; prompt: string; createdAt: number; result?: CheckResult[]; elapsed?: number };
 const starter: Conversation[] = [
   ["viral", "Is the viral claim about…", "Is the viral claim about a new health study true?"],
@@ -9,6 +10,7 @@ const starter: Conversation[] = [
   ["climate", "Climate change facts…", "What evidence supports climate change?"],
   ["health", "Health claim verification…", "Can a health claim be verified from reliable sources?"],
 ].map(([id, title, prompt], index) => ({ id, title, prompt, createdAt: Date.now() - index }));
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
 
 const readConversations = (): Conversation[] => {
   try { const saved = localStorage.getItem("factai-conversations"); return saved ? JSON.parse(saved) : starter; } catch { return starter; }
@@ -40,7 +42,7 @@ function App() {
       const request = media
         ? { url: "/api/check-media", body: { filename: media.name, content: await fileToBase64(media) } }
         : { url: "/api/check", body: { text: cleaned } };
-      const response = await fetch(request.url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request.body) });
+      const response = await fetch(`${API_BASE_URL}${request.url}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request.body) });
       const data = await response.json() as { error?: string; claims?: CheckResult[]; elapsed?: number; transcript?: string };
       if (!response.ok || !data.claims) throw new Error(data.error || "The checker did not return a result.");
       const checkedText = data.transcript || cleaned;
@@ -90,7 +92,7 @@ function TopNav({ openPanel, newChat }: { openPanel: (panel: "features" | "examp
 
 function fileToBase64(file: File): Promise<string> { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onerror = () => reject(new Error("Could not read the selected file.")); reader.onload = () => resolve(String(reader.result).split(",")[1] || ""); reader.readAsDataURL(file); }); }
 
-function Results({ results, elapsed }: { results: CheckResult[]; elapsed?: number }) { return <section className="results" aria-live="polite"><p className="results-meta">{results.length} claim{results.length === 1 ? "" : "s"} checked{elapsed ? ` · ${elapsed}s total` : ""}</p>{results.map((result) => <article className="result-card" key={result.claim}><div className="result-top"><h2>{result.claim}</h2><span className={`verdict ${result.verdict.toLowerCase()}`}>{result.verdict}</span></div><p>{result.summary}</p><small>{result.strength}</small>{result.sources.length > 0 && <div className="sources">{result.sources.map((source) => <a key={source.url} href={source.url} target="_blank" rel="noreferrer">{source.title}</a>)}</div>}</article>)}</section>; }
+function Results({ results, elapsed }: { results: CheckResult[]; elapsed?: number }) { return <section className="results" aria-live="polite"><p className="results-meta">{results.length} claim{results.length === 1 ? "" : "s"} checked{elapsed ? ` · ${elapsed}s total` : ""}</p>{results.map((result) => <article className="result-card" key={result.claim}><div className="result-top"><h2>{result.claim}</h2><span className={`verdict ${result.verdict.toLowerCase()}`}>{result.verdict}</span></div><p>{result.summary}</p><small>{result.strength}{result.independent_sources ? ` · ${result.independent_sources} independent domain${result.independent_sources === 1 ? "" : "s"}` : ""}</small>{result.sources.length > 0 && <div className="sources">{result.sources.map((source) => <a key={source.url} href={source.url} target="_blank" rel="noreferrer">{source.title}{source.quality ? <em>{source.quality}</em> : null}</a>)}</div>}{result.evidence && <details className="evidence-details"><summary>Evidence and checks</summary>{result.evidence.map((item) => <div className="evidence-row" key={item.url}><a href={item.url} target="_blank" rel="noreferrer">{item.title}</a><span className={`evidence-stance ${item.stance}`}>{item.stance}</span><p>{item.excerpt || "No extractable passage; the result was assessed from the search snippet."}</p><small>{item.quality} · {item.retrieval_role}{item.source_date ? ` · visible date: ${item.source_date}` : ""}{item.number_check ? ` · number check: claim says ${item.number_check.claimed}; source says ${item.number_check.found}` : ""}</small></div>)}</details>}</article>)}</section>; }
 
 function Panel({ name, close, useExample }: { name: string; close: () => void; useExample: (value: string) => void }) { const content: Record<string, React.ReactNode> = { features: <>FactAI extracts factual claims, retrieves public web sources, and uses its local NLI model to weigh the evidence.</>, examples: <div className="examples"><button onClick={() => useExample("The Earth revolves around the Sun.")}>Earth orbits the Sun</button><button onClick={() => useExample("Antibiotics are effective against viruses.")}>Antibiotics and viruses</button></div>, pricing: <>This local workspace uses your installed FactAI backend.</>, docs: <>Enter a factual claim and press Enter. FactAI will retrieve web evidence and return a verdict with sources.</>, onboarding: <>Welcome to FACTAI. Start the local API, then enter a factual statement to check it against live web evidence.</> }; return <div className="modal-backdrop" role="presentation" onMouseDown={close}><section className="info-panel" role="dialog" aria-modal="true" aria-label={`${name} information`} onMouseDown={(event) => event.stopPropagation()}><button className="panel-close" onClick={close} aria-label="Close"><X/></button><h2>{name === "onboarding" ? "Get started" : name[0].toUpperCase() + name.slice(1)}</h2><div>{content[name]}</div></section></div>; }
 

@@ -50,6 +50,15 @@ HEADERS = {
 
 _MODEL_CACHE = {}
 
+# Source quality is deliberately conservative. It is a retrieval aid, not a
+# declaration that a publisher can never be wrong.
+_PRIMARY_HOST_SUFFIXES = (".gov", ".gov.in", ".nic.in", ".edu", ".ac.uk", ".int")
+_REFERENCE_HOSTS = ("wikipedia.org", "wikidata.org")
+_ESTABLISHED_HOSTS = (
+    "who.int", "un.org", "nature.com", "science.org", "britannica.com",
+    "reuters.com", "apnews.com", "bbc.com", "nytimes.com", "thehindu.com",
+)
+
 
 def load_nli_model():
     """Load (and cache) the tokenizer + model. Safe to call repeatedly."""
@@ -86,6 +95,49 @@ def _chunk_words(text: str, chunk_size: int = 180):
     if not words:
         return []
     return [" ".join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
+
+
+def _source_quality(url: str) -> tuple[str, float]:
+    """Return a visible source tier and a conservative evidence weight."""
+    host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    if host.endswith(_PRIMARY_HOST_SUFFIXES):
+        return "Primary / official", 1.0
+    if host.endswith(_REFERENCE_HOSTS):
+        return "Reference", 0.45
+    if host.endswith(_ESTABLISHED_HOSTS):
+        return "Established source", 0.75
+    return "Web source", 0.55
+
+
+def _evidence_domain(url: str) -> str:
+    """Collapse common subdomains so one publisher cannot vote repeatedly."""
+    host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    parts = host.split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def _weighted_verdict(evidence: list[dict]) -> tuple[str, float, float, int]:
+    """Aggregate only independent, decisive evidence into a cautious verdict."""
+    by_domain: dict[str, dict] = {}
+    for item in evidence:
+        if item.get("stance") not in {"entailment", "contradiction"}:
+            continue
+        domain = _evidence_domain(item.get("url", ""))
+        weight = float(item.get("quality_weight", 0.55)) * float(item.get("score", 0.0))
+        existing = by_domain.get(domain)
+        if existing is None or weight > existing["weight"]:
+            by_domain[domain] = {"stance": item["stance"], "weight": weight}
+
+    support = sum(item["weight"] for item in by_domain.values() if item["stance"] == "entailment")
+    refute = sum(item["weight"] for item in by_domain.values() if item["stance"] == "contradiction")
+    independent = len(by_domain)
+    if support > 0 and refute > 0:
+        return "Misleading", support, refute, independent
+    if support >= 1.1 or any(item["stance"] == "entailment" and item["weight"] >= 0.9 for item in by_domain.values()):
+        return "True", support, refute, independent
+    if refute >= 1.1 or any(item["stance"] == "contradiction" and item["weight"] >= 0.9 for item in by_domain.values()):
+        return "False", support, refute, independent
+    return "Unverified", support, refute, independent
 
 
 _CLAIM_STOPWORDS = {
@@ -349,6 +401,46 @@ def _evidence_strength(support_count: int, refute_count: int) -> str:
     return "Limited evidence"
 
 
+def _extract_source_date(text: str) -> str | None:
+    """Return a visible publication/update date when one can be identified.
+
+    The date is disclosed to the reader; it is not treated as proof that a
+    source is current. Pages frequently contain dates unrelated to publication.
+    """
+    match = re.search(
+        r"\b(?:published|updated|last updated|date)\s*[:\-]?\s*"
+        r"((?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|"
+        r"dec(?:ember)?)\s+\d{1,2},?\s+20\d{2}|\d{4}-\d{2}-\d{2})",
+        text or "", re.IGNORECASE,
+    )
+    return match.group(1) if match else None
+
+
+def _number_conflict(claim: str, excerpt: str) -> dict | None:
+    """Spot an explicit same-unit numeric mismatch in directly retrieved text.
+
+    This is deliberately narrow: quantities without a shared unit are ignored,
+    as are years/dates, which need timeline reasoning rather than arithmetic.
+    """
+    unit_pattern = r"percent|%|degrees?|°c|°f|million|billion|thousand|kilometers?|km|miles?|kg|kilograms?|hours?|days?"
+    pattern = re.compile(rf"\b(?P<number>\d+(?:\.\d+)?)\s*(?P<unit>{unit_pattern})\b", re.IGNORECASE)
+    claim_values = list(pattern.finditer(claim or ""))
+    excerpt_values = list(pattern.finditer(excerpt or ""))
+    for expected in claim_values:
+        expected_unit = expected.group("unit").lower().replace("%", "percent")
+        for actual in excerpt_values:
+            actual_unit = actual.group("unit").lower().replace("%", "percent")
+            if expected_unit != actual_unit:
+                continue
+            if float(expected.group("number")) != float(actual.group("number")):
+                return {
+                    "claimed": expected.group(0), "found": actual.group(0),
+                    "excerpt": excerpt[:220],
+                }
+    return None
+
+
 def verify_claim(
     claim: str,
     search_results,
@@ -380,9 +472,8 @@ def verify_claim(
         with timed(timing, "nli_scoring"):
             result = score_source_against_claim(claim, text_to_check, tokenizer, model)
         stance = result["label"] if result["score"] >= min_confidence else "neutral"
-        duration_conflict = _tenure_duration_conflict(
-            claim, "\n".join(part for part in (page_text, res.get("snippet", "")) if part)
-        )
+        combined_text = "\n".join(part for part in (page_text, res.get("snippet", "")) if part)
+        duration_conflict = _tenure_duration_conflict(claim, combined_text)
         if duration_conflict:
             # A dated start directly contradicts an impossible tenure,
             # even if the NLI model confuses the wording.
@@ -396,6 +487,13 @@ def verify_claim(
             stance = "entailment"
             if not result.get("chunk"):
                 result["chunk"] = res.get("snippet", "")[:220]
+        number_conflict = _number_conflict(claim, result.get("chunk") or combined_text)
+        if number_conflict and stance != "entailment":
+            # A same-unit mismatch is explicit counterevidence, but never
+            # overrides a direct exact textual match from the source.
+            stance = "contradiction"
+            result["chunk"] = number_conflict["excerpt"]
+        quality_label, quality_weight = _source_quality(res["url"])
         evidence.append({
             "url": res["url"],
             "title": res.get("title") or res["url"],
@@ -403,6 +501,11 @@ def verify_claim(
             "score": result["score"],
             "excerpt": result.get("chunk", "")[:220],
             "current_office_support": current_office_support,
+            "source_quality": quality_label,
+            "quality_weight": quality_weight,
+            "retrieval_role": res.get("retrieval_role", "claim search"),
+            "source_date": _extract_source_date(combined_text),
+            "number_conflict": number_conflict,
         })
 
     support_count = sum(1 for e in evidence if e["stance"] == "entailment")
@@ -412,6 +515,7 @@ def verify_claim(
         # Keep the citation list intact while ensuring the verdict reflects the
         # two direct pieces of retrieved evidence rather than an NLI miss.
         evidence[0]["stance"] = "entailment"
+        evidence[0]["score"] = 1.0
         support_count = 1
 
     authoritative_current_support = any(e["current_office_support"] for e in evidence)
@@ -425,12 +529,20 @@ def verify_claim(
         refute_count = sum(1 for e in evidence if e["stance"] == "contradiction")
         verdict = "True"
     else:
-        verdict = _map_verdict(support_count, refute_count) if evidence else "Unverified"
-    strength = _evidence_strength(support_count, refute_count)
+        verdict, support_weight, refute_weight, independent_sources = _weighted_verdict(evidence)
+    if authoritative_current_support:
+        support_weight, refute_weight, independent_sources = 1.0, 0.0, 1
+    strength = _evidence_strength(support_weight, refute_weight)
     with timed(timing, "summary_generation"):
         summary = generate_summary(claim, verdict, evidence, model=summarizer_model, timing=timing)
 
-    sources = [{"title": e["title"], "url": e["url"]} for e in evidence]
+    sources = [{"title": e["title"], "url": e["url"], "quality": e["source_quality"]} for e in evidence]
+    public_evidence = [{
+        "title": e["title"], "url": e["url"], "stance": e["stance"],
+        "excerpt": e["excerpt"], "quality": e["source_quality"],
+        "retrieval_role": e["retrieval_role"], "source_date": e["source_date"],
+        "number_check": e["number_conflict"],
+    } for e in evidence]
 
     return {
         "claim": claim,
@@ -438,4 +550,6 @@ def verify_claim(
         "strength": strength,
         "summary": summary,
         "sources": sources,
+        "independent_sources": independent_sources,
+        "evidence": public_evidence,
     }
